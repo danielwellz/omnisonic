@@ -1,0 +1,127 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now())
+}
+
+model Work {
+  id          String          @id @default(uuid())
+  title       String
+  description String?
+  iswc        String? @unique
+  genres      String[]        @default([])
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  recordings  Recording[]
+  contributions Contribution[]
+}
+
+model Recording {
+  id              String   @id @default(uuid())
+  title           String
+  workId          String
+  isrc            String? @unique
+  durationSeconds Int
+  primaryArtist   String
+  releasedAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  work Work @relation(fields: [workId], references: [id], onDelete: Cascade)
+  royaltyEvents RoyaltyEvent[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([workId])
+}
+
+model Contributor {
+  id        String          @id @default(uuid())
+  name      String
+  roles     String[]        @default([])
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  contributions Contribution[]
+  ledgerEntries LedgerEntry[]
+}
+
+model Contribution {
+  id            String       @id @default(uuid())
+  role          String
+  pctShare      Float
+  workId        String
+  contributorId String
+  createdAt     DateTime     @default(now())
+
+  work        Work        @relation(fields: [workId], references: [id], onDelete: Cascade)
+  contributor Contributor @relation(fields: [contributorId], references: [id], onDelete: Cascade)
+
+  @@unique([workId, contributorId, role])
+}
+
+model RoyaltyEvent {
+  id           String   @id @default(uuid())
+  recordingId  String
+  workId       String?
+  usageType    String
+  quantity     Int      @default(1)
+  amount       Decimal  @db.Decimal(18, 6)
+  currency     String   @default("USD")
+  territory    String?
+  occurredAt   DateTime
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  recording Recording @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  work      Work?     @relation(fields: [workId], references: [id], onDelete: SetNull)
+  ledgerEntries LedgerEntry[]
+
+  @@index([recordingId])
+  @@index([workId])
+  @@index([occurredAt])
+}
+
+model CycleCheckpoint {
+  id           String   @id @default(uuid())
+  cycleNumber  Int
+  closedAt     DateTime
+  currency     String   @default("USD")
+  totalAmount  Decimal  @db.Decimal(18, 6)
+  merkleRoot   String
+  createdAt    DateTime @default(now())
+
+  ledgerEntries LedgerEntry[]
+
+  @@unique([cycleNumber, currency])
+}
+
+model LedgerEntry {
+  id             String   @id @default(uuid())
+  eventId        String
+  workId         String?
+  contributorId  String?
+  cycleId        String?
+  amount         Decimal  @db.Decimal(18, 6)
+  currency       String   @default("USD")
+  direction      String   @default("credit")
+  description    String?
+  createdAt      DateTime @default(now())
+
+  event        RoyaltyEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  work         Work?        @relation(fields: [workId], references: [id], onDelete: SetNull)
+  contributor  Contributor? @relation(fields: [contributorId], references: [id], onDelete: SetNull)
+  cycle        CycleCheckpoint? @relation(fields: [cycleId], references: [id], onDelete: SetNull)
+
+  @@index([eventId])
+  @@index([workId])
+  @@index([contributorId])
+  @@index([cycleId])
+}

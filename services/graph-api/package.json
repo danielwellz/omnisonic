@@ -1,0 +1,21 @@
+{
+  "name": "@omnisonic/graph-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node --enable-source-maps dist/index.js",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@omnisonic/db": "workspace:*",
+    "@omnisonic/royalty-ledger": "workspace:*",
+    "@graphql-yoga/node": "3.9.1",
+    "graphql": "16.9.0"
+  },
+  "devDependencies": {
+    "tsx": "4.19.0",
+    "typescript": "5.6.3"
+  }
+}

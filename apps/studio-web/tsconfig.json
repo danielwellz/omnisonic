@@ -1,0 +1,11 @@
+{
+  "extends": "../../packages/config/tsconfig.base.json",
+  "include": ["."],
+  "compilerOptions": {
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"]
+    }
+  }
+}
