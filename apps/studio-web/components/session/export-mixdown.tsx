@@ -5,9 +5,10 @@ import { Button } from "@/components/ui/button";
 
 interface ExportMixdownProps {
   sessionId: string;
+  disabled?: boolean;
 }
 
-export function ExportMixdown({ sessionId }: ExportMixdownProps) {
+export function ExportMixdown({ sessionId, disabled = false }: ExportMixdownProps) {
   const [status, setStatus] = useState<"idle" | "loading" | "error" | "done">("idle");
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +41,7 @@ export function ExportMixdown({ sessionId }: ExportMixdownProps) {
 
   return (
     <div className="space-y-3">
-      <Button onClick={handleExport} disabled={status === "loading"}>
+      <Button onClick={handleExport} disabled={disabled || status === "loading"}>
         {status === "loading" ? "Rendering mixdown…" : "Export mixdown"}
       </Button>
       {status === "done" && url ? (

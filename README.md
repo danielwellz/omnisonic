@@ -13,6 +13,12 @@
 **Environment**
 - Set `DATABASE_URL="postgres://postgres:postgres@localhost:5432/postgres"` (matches `docker-compose.dev.yml`).
 - Set `REDIS_URL="redis://localhost:6379"` for presence APIs.
+- Storage (uploads/exports):
+  - `STORAGE_TYPE=local` (default) or `minio`/`s3`
+  - `S3_BUCKET_NAME` / `MINIO_BUCKET_NAME`
+  - `S3_REGION`, `MINIO_ENDPOINT`
+  - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (or MinIO access/secret)
+  - Optional `STORAGE_CDN_URL`, `STORAGE_LOCAL_DIR`
 - OpenTelemetry emits spans to stdout; no vendor keys required.
 
 ## Local services
@@ -24,5 +30,7 @@
 - `cd services/ingest && uvicorn ingest.main:app --reload --port 8100` — ISRC ingest FastAPI service
 - `pnpm dev --filter @omnisonic/insight-web` — ClickHouse-powered trends dashboard
 - `pnpm dev --filter @omnisonic/alerts` — ClickHouse-backed alert polling service
+- `pnpm dev --filter @omnisonic/upload-cleaner` — Periodic cleanup of orphaned uploads
+- `docker compose -f infra/docker/docker-compose.dev.yml up minio` — Local MinIO (API :9000, console :9001)
 
 See `/docs/specs/phase-1-studio.md` to print Phase-1 spec.

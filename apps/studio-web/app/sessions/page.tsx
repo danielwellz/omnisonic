@@ -6,12 +6,14 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { usePresence } from "@/hooks/usePresence";
 
-type Session = { id: string; name: string; participants: number; created_at: string };
+type Owner = { id: string; name: string | null; email: string | null } | null;
+type Session = { id: string; name: string; participants: number; created_at: string; owner: Owner };
 
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [newName, setNewName] = useState("");
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
   const [memberId] = useState(() =>
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -37,8 +39,13 @@ export default function SessionsPage() {
 
   async function refresh() {
     const res = await fetch("/api/sessions");
+    if (res.status === 401) {
+      window.location.href = `/signin?callbackUrl=${encodeURIComponent(window.location.pathname)}`;
+      return;
+    }
     const data = await res.json();
     setSessions(data.sessions);
+    setCurrentUserId(data.currentUserId ?? null);
     if (!activeSessionId && data.sessions.length > 0) {
       setActiveSessionId(data.sessions[0].id);
     }
@@ -136,6 +143,11 @@ export default function SessionsPage() {
                 <span className="text-xs text-muted-foreground">
                   Started {new Date(session.created_at).toLocaleString()}
                 </span>
+                {session.owner ? (
+                  <span className="text-xs text-muted-foreground">
+                    Owned by {session.owner.id === currentUserId ? "you" : session.owner.email ?? session.owner.name ?? "Unknown"}
+                  </span>
+                ) : null}
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button variant={isActive ? "default" : "secondary"} onClick={() => setActiveSessionId(session.id)}>

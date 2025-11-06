@@ -3,15 +3,20 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { ExportMixdown } from "@/components/session/export-mixdown";
+import { UploadPanel } from "@/components/session/upload-panel";
 
-async function fetchSession(id: string, baseUrl: string) {
+type Owner = { id: string; name: string | null; email: string | null } | null;
+
+async function fetchSession(id: string, baseUrl: string, cookie: string | null) {
   const url = new URL(`/api/sessions?id=${id}`, baseUrl);
   const res = await fetch(url.toString(), {
-    cache: "no-store"
+    cache: "no-store",
+    headers: cookie ? { cookie } : undefined
   });
   if (!res.ok) return null;
   const data = await res.json();
-  return data.session ?? null;
+  if (!data.session) return null;
+  return { session: data.session as Session, currentUserId: data.currentUserId as string };
 }
 
 type Session = {
@@ -19,6 +24,7 @@ type Session = {
   name: string;
   participants: number;
   created_at: string;
+  owner: Owner;
 };
 
 export default async function SessionDetail({ params }: { params: { id: string } }) {
@@ -30,8 +36,12 @@ export default async function SessionDetail({ params }: { params: { id: string }
     process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ??
     (host ? `${protocol}://${host}` : "http://localhost:3000");
 
-  const session = (await fetchSession(params.id, baseUrl)) as Session | null;
-  if (!session) notFound();
+  const cookie = headersList.get("cookie");
+  const payload = await fetchSession(params.id, baseUrl, cookie);
+  if (!payload) notFound();
+
+  const { session, currentUserId } = payload;
+  const isOwner = session.owner?.id === currentUserId;
 
   return (
     <main className="mx-auto flex max-w-3xl flex-col gap-8 py-12">
@@ -41,10 +51,15 @@ export default async function SessionDetail({ params }: { params: { id: string }
         <p className="mt-2 text-sm text-muted-foreground">
           Created {new Date(session.created_at).toLocaleString()} • {session.participants} currently inside.
         </p>
+        {session.owner ? (
+          <p className="text-xs text-muted-foreground">
+            Owned by {isOwner ? "you" : session.owner.email ?? session.owner.name ?? "Unknown"}
+          </p>
+        ) : null}
       </div>
       <div className="flex flex-wrap gap-3">
-        <Button size="lg">Join Room</Button>
-        <Button size="lg" variant="secondary">
+        <Button size="lg" disabled={!isOwner}>Join Room</Button>
+        <Button size="lg" variant="secondary" disabled={!isOwner}>
           Leave Room
         </Button>
         <Button variant="outline" asChild>
@@ -60,10 +75,21 @@ export default async function SessionDetail({ params }: { params: { id: string }
       <section className="rounded-lg border bg-card p-6">
         <h2 className="text-xl font-semibold">Mixdown Export</h2>
         <p className="mt-2 text-sm text-muted-foreground">
-          Trigger a mock render to preview the future mixdown pipeline.
+          {isOwner
+            ? "Trigger a mixdown export and download the rendered audio when it completes."
+            : "Only the session owner can trigger exports."}
         </p>
         <div className="mt-4">
-          <ExportMixdown sessionId={session.id} />
+          <ExportMixdown sessionId={session.id} disabled={!isOwner} />
+        </div>
+      </section>
+      <section className="rounded-lg border bg-card p-6">
+        <h2 className="text-xl font-semibold">Session uploads</h2>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Share stems, artwork, or reference files with collaborators.
+        </p>
+        <div className="mt-4">
+          <UploadPanel sessionId={session.id} disabled={!isOwner} />
         </div>
       </section>
     </main>

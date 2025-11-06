@@ -11,7 +11,8 @@
       "@ui/*": ["../ui/src/*"],
       "@schemas/*": ["../schemas/src/*"],
       "@trpc/*": ["../trpc/src/*"],
-      "@db/*": ["../db/src/*"]
+      "@db/*": ["../db/src/*"],
+      "@storage/*": ["../storage/src/*"]
     }
   }
 }

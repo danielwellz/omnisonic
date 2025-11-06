@@ -5,5 +5,6 @@ dist
 .DS_Store
 __pycache__/
 .pytest_cache/
+.uploads/
 playwright-report
 test-results

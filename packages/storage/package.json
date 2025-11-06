@@ -1,0 +1,26 @@
+{
+  "name": "@omnisonic/storage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.676.0",
+    "@aws-sdk/lib-storage": "3.676.0",
+    "@aws-sdk/s3-request-presigner": "3.676.0",
+    "mime": "4.0.4"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3"
+  }
+}

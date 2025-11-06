@@ -1,0 +1,59 @@
+name: Deploy Staging
+
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL_STAGING }}
+      REDIS_URL: ${{ secrets.REDIS_URL_STAGING }}
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST_STAGING }}
+      STORAGE_TYPE: ${{ secrets.STORAGE_TYPE_STAGING }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm db:generate
+
+      - name: Build monorepo
+        run: pnpm build
+
+      - name: Run migrations
+        run: pnpm exec prisma migrate deploy
+
+      - name: Deploy applications
+        run: |
+          echo "Deploying web apps/services to staging..."
+          echo "(replace with actual deployment commands: e.g., vercel deploy --prod, render.yaml, etc.)"
+
+      - name: Health checks
+        run: |
+          echo "Smoke testing staging environment"
+          echo "(add curl/integration checks here)"
