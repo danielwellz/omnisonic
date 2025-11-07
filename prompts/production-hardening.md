@@ -445,3 +445,201 @@ Generate API documentation:
 - Update E2E tests as you add features
 - Document breaking changes in CHANGELOG.md
 
+
+
+
+  ## Chunk 1 — Studio Auth & Hardening Foundation
+
+  Goals: Secure Studio app, lay groundwork for storage/exports.
+
+  1. Add NextAuth.js v5 to apps/studio-web:
+      - Extend Prisma schema (User, Account, Session, VerificationToken, Session.userId FK).
+      - Configure adapters, GitHub OAuth (plus optional Google/Discord/credentials).
+      - Create /api/auth/[...nextauth], session middleware, and auth-protected layout.
+      - Build sign-in/sign-out UI (shadcn/ui).
+      - Enforce auth on /sessions pages + API; store session ownership.
+      - Update session detail to show owner & restrict editing.
+      - Adjust Playwright tests for auth flow.
+  2. Infrastructure basics:
+      - Add required env vars (NEXTAUTH_*, provider IDs).
+      - Generate Prisma migration & run locally.
+
+  Exit Check: Auth works E2E (Sign in → create session → access protected routes via tests).
+
+  ———
+
+  ## Chunk 2 — CI/CD & Tooling Backbone
+
+  Goals: Ensure safe iteration before shipping storage/export changes.
+
+  1. GitHub Actions:
+      - ci.yml: lint, typecheck, build, Playwright.
+      - deploy-staging.yml & deploy-production.yml with approvals, migrations.
+      - Add caching and Node 20/22 matrix where relevant.
+  2. Docker images/build workflow (optional docker-build.yml).
+  3. Document secrets & env management.
+
+  Exit Check: Actions pass on PR; staging pipeline green (even if target envs stubbed).
+
+  ———
+
+  ## Chunk 3 — File Uploads & Storage Infrastructure
+
+  Goals: Real storage, metadata, local MinIO.
+
+  1. Prisma: Upload model; MinIO service in docker-compose.dev.yml.
+  2. Upload API overhaul:
+      - Auth-required POST, metadata saved, S3/MinIO/local storage choice.
+      - File validation, multipart support, presigned download URLs.
+      - GET /api/upload/[id], DELETE /api/upload/[id]/delete.
+      - Scheduled cleanup for orphaned uploads.
+  3. UI updates: integrate real upload flow in Studio.
+  4. Env vars: STORAGE_*, credentials.
+
+  Exit Check: Upload tests (unit/E2E) pass with MinIO locally; metadata persisted.
+
+  ———
+
+  ## Chunk 4 — Export Mixdown Pipeline
+
+  Goals: Real export jobs via worker + FFmpeg.
+
+  1. Prisma: Export model.
+  2. Export worker service (services/export-worker):
+      - BullMQ queue (Redis).
+      - FFmpeg processing (formats), upload results, status updates.
+      - Progress events via realtime gateway (export.progress).
+  3. API routes:
+      - POST enqueue (owner only), GET status, download route with auth.
+  4. Session detail UI: export history, progress, downloads (real-time updates).
+  5. Env vars: queue concurrency, limits.
+  6. Testing: unit (worker), integration (API), E2E (mock processing).
+
+  Exit Check: Export job runs in dev (mock audio) and surfaces progress/download.
+
+  ———
+
+  ## Chunk 5 — Graph API Real-Time & License Management
+
+  Goals: Phase 2 real-time + licensing core.
+
+  1. Subscriptions:
+      - New @omnisonic/pubsub (Redis) package.
+      - Graph API Subscription resolvers (workUpdated, etc.), WebSocket server (port 4001).
+      - Mutations publish events.
+      - Frontend client updates to consume subscriptions.
+  2. License Management:
+      - Prisma License model.
+      - GraphQL types, queries, mutations (create/update/revoke/active).
+      - Validation (dates, overlaps).
+      - Daily expiration job (Node service or cron).
+      - Conflict detection helper.
+  3. Update docs/specs.
+
+  Exit Check: Graph API tests (unit/integration) passing; subscription events visible from client.
+
+  ———
+
+  ## Chunk 6 — Bulk Import Pipeline
+
+  Goals: High-volume ingest with queues.
+
+  1. Prisma BulkImportJob.
+  2. Ingest service:
+      - /ingest/isrc/bulk (async job creation, file validation, rate limiting).
+      - /ingest/isrc/bulk/[jobId] status endpoint.
+  3. Worker (services/ingest-worker, Python):
+      - Processes jobs (batching, concurrency, retries).
+      - Updates progress, handles JSON Lines.
+      - Uses BullMQ queue shared with Node (or dedicated).
+  4. Redis progress tracking; rate limit enforcement.
+  5. Tests (unit/integration/E2E stub).
+
+  Exit Check: Upload >50k records processed in batches; status endpoints accurate.
+
+  ———
+
+  ## Chunk 7 — Insight Enhanced Tagging & Alerts
+
+  Goals: Smarter tagging, multi-channel alerting.
+
+  1. Tagging improvements:
+      - `EntityTag` model (Prisma) + Graph API `recordEntityTags` mutation.
+      - Hybrid matcher (token overlap + TheFuzz + optional SentenceTransformer embeddings w/ Redis caching & snippet capture).
+      - Env-configurable thresholds (`INGEST_TAGGING_*`), normalized stoplists, deterministic news-item IDs.
+      - `/ingest/tagging/improve` endpoint to re-run stored feeds and push results via Graph API.
+  2. Alerts service upgrades:
+      - `AlertChannel`, `AlertRule`, `AlertEvent` models + Fastify CRUD API.
+      - Email (nodemailer/SMTP), webhook, and Slack channels with string-template customization.
+      - Rule cooldowns, per-channel rate limiting, ClickHouse-backed polling worker, event history UI hooks.
+
+  3. ClickHouse queries adjustments for new data.
+
+  Exit Check: Alerts fire to configured channels during threshold crossing; tagging stores enriched metadata.
+
+  ———
+
+  ## Chunk 8 — Insight Analytics Dashboard
+
+  Goals: Advanced charts, data exports.
+
+  1. ClickHouse views:
+      - entity_mentions_timeseries, genre_trends, source_performance.
+  2. Insight Web:
+      - /analytics page with charts (recharts/visx) + filters.
+      - Server actions for time series, genres, sources, network graph.
+      - Export options (PNG/CSV) using server actions.
+  3. UI polish, accessibility checks.
+
+  Exit Check: Analytics page interactive, filters work, exports succeed.
+
+  ———
+
+  ## Chunk 9 — Ops Hardening (Staging, Backups, Replicas)
+
+  Goals: Production-grade infrastructure.
+
+  1. Staging environment:
+      - docker-compose.staging.yml, .env.staging, seeding script, health endpoints.
+      - /docs/deployment/staging.md.
+  2. Backup strategy:
+      - scripts/backup-db.sh, restore-db.sh.
+      - Prisma Backup model + services/backup-scheduler.
+      - ClickHouse backups doc.
+      - /docs/operations/backups.md.
+  3. Read replicas:
+      - Extend @omnisonic/db with read/write helpers.
+      - Use DATABASE_URL + DATABASE_READ_URL.
+      - Update services to prefer read replica where safe.
+      - /docs/operations/read-replicas.md.
+
+  Exit Check: Backups run in dev/staging, replica config documented/tested.
+
+  ———
+
+  ## Chunk 10 — Testing, Monitoring, Documentation polish
+
+  Goals: QA coverage, error monitoring, docs finalization.
+
+  1. E2E expansions (auth, uploads, export, subscriptions, bulk import, alerts).
+  2. Add Lighthouse, axe-core, visual regression.
+  3. Integrate Sentry (frontend & backend); error boundaries.
+  4. Structured logging (correlation IDs), error response docs.
+  5. Docs updates:
+      - Specs (Phases 1–3).
+      - Operations docs (deployment, monitoring, troubleshooting).
+      - API docs (OpenAPI for FastAPI, GraphQL schema export).
+
+  Exit Check: Test suite comprehensive, monitoring in place, docs final.
+
+  ———
+
+  ### Tips for Execution
+
+  - Treat each chunk as a branch/PR series.
+  - Run Prisma migrations incrementally (nullable → required transitions).
+  - Update CHANGELOG for breaking changes.
+  - Keep env docs in sync; share .env.example updates.
+  - Validate each chunk via local CI before merging.
+
+  Let me know where you want to start; I can help create detailed task lists or implementation steps for any chunk.

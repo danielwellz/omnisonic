@@ -3,8 +3,9 @@ import io
 import logging
 import os
 import re
+import uuid
 from datetime import datetime, timezone
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import duckdb
 import feedparser
@@ -16,12 +17,132 @@ from pydantic import BaseModel, Field, AnyHttpUrl
 ISRC_PATTERN = re.compile(r"^[A-Z]{2}[A-Z0-9]{3}\d{2}\d{5}$")
 
 from .config import get_settings
-from .tagging import TaggingConfig, TaggingStoplist, match_entities
+from .tagging import (
+    EmbeddingClient,
+    TaggingConfig,
+    TaggingStoplist,
+    get_embedding_client,
+    match_entities
+)
 
 logger = logging.getLogger("ingest")
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Omnisonic Ingest Service")
+
+_embedding_client: Optional[EmbeddingClient] = None
+
+
+def ensure_embedding_client(force: bool = False) -> Optional[EmbeddingClient]:
+    """Lazy load the embedding client when requested."""
+    global _embedding_client
+    if not force:
+        settings = get_settings()
+        force = settings.tagging_use_embeddings
+
+    if not force:
+        return _embedding_client if _embedding_client and _embedding_client.enabled else None
+
+    settings = get_settings()
+    client = get_embedding_client(
+        model_name=settings.tagging_embeddings_model,
+        cache_ttl=settings.tagging_embedding_cache_ttl,
+        redis_url=str(settings.redis_url) if settings.redis_url else None
+    )
+    _embedding_client = client
+    return client if client.enabled else None
+
+
+def build_tagging_config(
+    *,
+    artists: Sequence[str],
+    works: Sequence[str],
+    recordings: Sequence[str],
+    stoplist_artists: Sequence[str],
+    stoplist_works: Sequence[str],
+    stoplist_recordings: Sequence[str],
+    fuzzy_threshold: Optional[int],
+    embedding_threshold: Optional[float],
+    use_embeddings: Optional[bool]
+) -> TaggingConfig:
+    settings = get_settings()
+    return TaggingConfig(
+        artists=artists,
+        works=works,
+        recordings=recordings,
+        stoplist=TaggingStoplist(
+            artists=stoplist_artists or [],
+            works=stoplist_works or [],
+            recordings=stoplist_recordings or []
+        ),
+        fuzzy_threshold=fuzzy_threshold or settings.tagging_fuzzy_threshold,
+        embedding_threshold=embedding_threshold or settings.tagging_embedding_threshold,
+        use_embeddings=use_embeddings if use_embeddings is not None else settings.tagging_use_embeddings,
+    )
+
+
+def news_item_id_for(url: str) -> str:
+    normalized = (url or "").strip()
+    if not normalized:
+        return str(uuid.uuid4())
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, normalized))
+
+
+ENTITY_TAG_MUTATION = """
+  mutation RecordEntityTags($input: EntityTagBatchInput!) {
+    recordEntityTags(input: $input) { id }
+  }
+"""
+
+
+async def record_entity_tags(
+    client: httpx.AsyncClient,
+    base_url: str,
+    news_item_id: str,
+    tags: List[Dict[str, object]]
+) -> bool:
+    try:
+        response = await client.post(
+            f"{base_url}/graphql",
+            json={
+                "query": ENTITY_TAG_MUTATION,
+                "variables": {
+                    "input": {
+                        "newsItemId": news_item_id,
+                        "tags": tags
+                    }
+                }
+            },
+            timeout=15.0
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if "errors" in payload:
+            logger.warning("Graph API errors while recording tags for %s: %s", news_item_id, payload["errors"])
+            return False
+        return True
+    except httpx.HTTPError as exc:
+        logger.warning("Failed to record entity tags for %s: %s", news_item_id, exc)
+        return False
+
+
+def build_tag_payload(result: Dict[str, object]) -> List[Dict[str, object]]:
+    tags: List[Dict[str, object]] = []
+    for entity_type in ("artist", "work", "recording"):
+        value = result.get(entity_type)
+        if not value:
+            continue
+        confidence = float(result.get("confidence", {}).get(entity_type, 0.0) or 0.0)
+        tags.append(
+            {
+                "entityType": entity_type,
+                "entityId": value,
+                "confidence": max(0.0, min(confidence, 1.0)),
+                "method": result.get("methods", {}).get(entity_type) or "heuristic",
+                "matchedText": result.get("matched_text", {}).get(entity_type)
+            }
+        )
+    return tags
 
 class RawTrack(BaseModel):
     isrc: str
@@ -44,14 +165,20 @@ class RssIngestRequest(BaseModel):
     stoplist_artists: Sequence[str] = Field(default_factory=list)
     stoplist_works: Sequence[str] = Field(default_factory=list)
     stoplist_recordings: Sequence[str] = Field(default_factory=list)
+    fuzzy_threshold: Optional[int] = Field(default=None, ge=1, le=100)
+    embedding_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+    use_embeddings: Optional[bool] = None
 
 
 class RssTaggedItem(BaseModel):
+    news_item_id: str
     url: str
     artist: Optional[str]
     work: Optional[str]
     recording: Optional[str]
-    confidence: dict
+    confidence: Dict[str, float]
+    methods: Dict[str, Optional[str]]
+    matched_text: Dict[str, Optional[str]]
 
 
 class RssFeedSummary(BaseModel):
@@ -67,6 +194,29 @@ class RssIngestResponse(BaseModel):
     feeds: List[RssFeedSummary]
     total_processed: int
     total_inserted: int
+
+
+class TaggingImproveRequest(BaseModel):
+    limit: int = Field(default=100, ge=1, le=1000)
+    source: Optional[str] = None
+    urls: Sequence[AnyHttpUrl] = Field(default_factory=list)
+    since: Optional[datetime] = None
+    artists: Sequence[str] = Field(default_factory=list)
+    works: Sequence[str] = Field(default_factory=list)
+    recordings: Sequence[str] = Field(default_factory=list)
+    stoplist_artists: Sequence[str] = Field(default_factory=list)
+    stoplist_works: Sequence[str] = Field(default_factory=list)
+    stoplist_recordings: Sequence[str] = Field(default_factory=list)
+    fuzzy_threshold: Optional[int] = Field(default=None, ge=1, le=100)
+    embedding_threshold: Optional[float] = Field(default=None, ge=0, le=1)
+    use_embeddings: Optional[bool] = None
+
+
+class TaggingImproveResponse(BaseModel):
+    retagged: int
+    updated: int
+    failures: int
+    items: List[RssTaggedItem]
 
 async def upsert_recording(client: httpx.AsyncClient, base_url: str, track: RawTrack) -> bool:
     try:
@@ -226,16 +376,18 @@ async def ingest_rss(request: RssIngestRequest) -> RssIngestResponse:
         conn = duckdb.connect(settings.duckdb_path)
         try:
             _ensure_duckdb_schema(conn)
-            tagging_config = TaggingConfig(
+            tagging_config = build_tagging_config(
                 artists=request.artists,
                 works=request.works,
                 recordings=request.recordings,
-                stoplist=TaggingStoplist(
-                    artists=request.stoplist_artists,
-                    works=request.stoplist_works,
-                    recordings=request.stoplist_recordings,
-                ),
+                stoplist_artists=request.stoplist_artists,
+                stoplist_works=request.stoplist_works,
+                stoplist_recordings=request.stoplist_recordings,
+                fuzzy_threshold=request.fuzzy_threshold,
+                embedding_threshold=request.embedding_threshold,
+                use_embeddings=request.use_embeddings,
             )
+            embedding_client = ensure_embedding_client(force=tagging_config.use_embeddings)
             for url in request.urls:
                 try:
                     feed = await _fetch_feed(client, str(url))
@@ -274,14 +426,32 @@ async def ingest_rss(request: RssIngestRequest) -> RssIngestResponse:
                         title=normalized["title"],
                         description=entry.get("summary"),
                         config=tagging_config,
+                        embedding_client=embedding_client,
+                    )
+                    news_item_id = news_item_id_for(normalized["url"])
+                    tag_payload = build_tag_payload(tag_result)
+                    await record_entity_tags(
+                        client,
+                        settings.graph_api_base,
+                        news_item_id,
+                        tag_payload,
                     )
                     tagged_items.append(
                         RssTaggedItem(
+                            news_item_id=news_item_id,
                             url=normalized["url"],
                             artist=tag_result["artist"],
                             work=tag_result["work"],
                             recording=tag_result["recording"],
-                            confidence=tag_result["confidence"],
+                            confidence={k: round(float(v or 0), 4) for k, v in tag_result.get("confidence", {}).items()},
+                            methods={
+                                key: tag_result.get("methods", {}).get(key)
+                                for key in ("artist", "work", "recording")
+                            },
+                            matched_text={
+                                key: tag_result.get("matched_text", {}).get(key)
+                                for key in ("artist", "work", "recording")
+                            },
                         )
                     )
 
@@ -310,3 +480,88 @@ def run() -> None:
     import uvicorn
 
     uvicorn.run("ingest.main:app", host="0.0.0.0", port=8100, reload=True)
+
+
+@app.post("/ingest/tagging/improve", response_model=TaggingImproveResponse)
+async def improve_tagging(request: TaggingImproveRequest) -> TaggingImproveResponse:
+    settings = get_settings()
+    os.makedirs(os.path.dirname(settings.duckdb_path) or ".", exist_ok=True)
+    conn = duckdb.connect(settings.duckdb_path)
+    try:
+        _ensure_duckdb_schema(conn)
+        query = "SELECT source, title, url, published_at FROM rss_items"
+        clauses: List[str] = []
+        params: List[object] = []
+        if request.source:
+            clauses.append("source = ?")
+            params.append(request.source)
+        if request.urls:
+            placeholders = ",".join(["?"] * len(request.urls))
+            clauses.append(f"url IN ({placeholders})")
+            params.extend([str(url) for url in request.urls])
+        if request.since:
+            clauses.append("published_at >= ?")
+            params.append(request.since)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY published_at DESC NULLS LAST LIMIT ?"
+        params.append(request.limit)
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    tagging_config = build_tagging_config(
+        artists=request.artists,
+        works=request.works,
+        recordings=request.recordings,
+        stoplist_artists=request.stoplist_artists,
+        stoplist_works=request.stoplist_works,
+        stoplist_recordings=request.stoplist_recordings,
+        fuzzy_threshold=request.fuzzy_threshold,
+        embedding_threshold=request.embedding_threshold,
+        use_embeddings=request.use_embeddings,
+    )
+    embedding_client = ensure_embedding_client(force=tagging_config.use_embeddings)
+
+    retagged_items: List[RssTaggedItem] = []
+    updated = 0
+    failures = 0
+
+    if not rows:
+        return TaggingImproveResponse(retagged=0, updated=0, failures=0, items=[])
+
+    async with httpx.AsyncClient() as client:
+        for _source, title, url_value, _ in rows:
+            tag_result = match_entities(
+                title=title or "",
+                description=None,
+                config=tagging_config,
+                embedding_client=embedding_client,
+            )
+            news_item_id = news_item_id_for(url_value)
+            payload = build_tag_payload(tag_result)
+            success = await record_entity_tags(client, settings.graph_api_base, news_item_id, payload)
+            if success:
+                updated += 1
+            else:
+                failures += 1
+            retagged_items.append(
+                RssTaggedItem(
+                    news_item_id=news_item_id,
+                    url=url_value,
+                    artist=tag_result["artist"],
+                    work=tag_result["work"],
+                    recording=tag_result["recording"],
+                    confidence={k: round(float(v or 0), 4) for k, v in tag_result.get("confidence", {}).items()},
+                    methods={
+                        key: tag_result.get("methods", {}).get(key)
+                        for key in ("artist", "work", "recording")
+                    },
+                    matched_text={
+                        key: tag_result.get("matched_text", {}).get(key)
+                        for key in ("artist", "work", "recording")
+                    },
+                )
+            )
+
+    return TaggingImproveResponse(retagged=len(rows), updated=updated, failures=failures, items=retagged_items)

@@ -7,7 +7,13 @@ import { ensureTracer } from "@omnisonic/telemetry";
 
 const tracer = ensureTracer("realtime-gateway");
 
-const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", {
+const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
+const EXPORT_PROGRESS_CHANNEL = process.env.EXPORT_PROGRESS_CHANNEL ?? "export:progress";
+
+const redis = new Redis(REDIS_URL, {
+  maxRetriesPerRequest: null
+});
+const redisSubscriber = new Redis(REDIS_URL, {
   maxRetriesPerRequest: null
 });
 
@@ -104,6 +110,24 @@ function send(socket: WebSocket, message: MessageEnvelope) {
 const server = createServer();
 const wss = new WebSocketServer({ server });
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
+
+redisSubscriber.subscribe(EXPORT_PROGRESS_CHANNEL, (error) => {
+  if (error) {
+    console.error("Failed to subscribe to export progress channel", error);
+  } else {
+    console.log(`Subscribed to export progress on ${EXPORT_PROGRESS_CHANNEL}`);
+  }
+});
+
+redisSubscriber.on("message", (_channel, payload) => {
+  try {
+    const data = JSON.parse(payload) as { sessionId?: string };
+    if (!data?.sessionId) return;
+    broadcast(data.sessionId, { type: "export.progress", payload: data });
+  } catch (error) {
+    console.warn("Failed to parse export progress payload", error);
+  }
+});
 
 wss.on("connection", (socket, request) => {
   const connectionSpan = tracer.startSpan("ws.connection", {
@@ -254,10 +278,9 @@ for (const signal of shutdownSignals) {
     console.info(`Received ${signal}, shutting down gateway...`);
     wss.close(() => {
       server.close();
-      redis
-        .quit()
+      Promise.all([redis.quit(), redisSubscriber.quit()])
         .then(() => {
-          console.info("Redis connection closed");
+          console.info("Redis connections closed");
           process.exit(0);
         })
         .catch((error) => {

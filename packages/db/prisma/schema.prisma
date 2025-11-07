@@ -15,6 +15,7 @@ model StudioSession {
 
   owner     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   uploads   Upload[]
+  exports   Export[]
 
   @@map("studio_sessions")
   @@index([userId])
@@ -32,6 +33,7 @@ model User {
   sessions       Session[]
   studioSessions StudioSession[]
   uploads        Upload[]
+  exports        Export[]
 }
 
 model Account {
@@ -80,6 +82,9 @@ model Work {
   updatedAt   DateTime        @updatedAt
   recordings  Recording[]
   contributions Contribution[]
+  licenses     License[]
+  royaltyEvents RoyaltyEvent[]
+  ledgerEntries LedgerEntry[]
 }
 
 model Recording {
@@ -95,7 +100,6 @@ model Recording {
 
   work Work @relation(fields: [workId], references: [id], onDelete: Cascade)
   royaltyEvents RoyaltyEvent[]
-  ledgerEntries LedgerEntry[]
 
   @@index([workId])
 }
@@ -199,4 +203,169 @@ model Upload {
 
   @@index([sessionId])
   @@index([createdAt])
+}
+
+model Export {
+  id           String        @id @default(uuid())
+  sessionId    String
+  userId       String
+  status       ExportStatus  @default(pending)
+  format       ExportFormat  @default(wav)
+  fileUrl      String?
+  storageKey   String?
+  fileSize     Int?
+  progress     Int           @default(0)
+  errorMessage String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  completedAt  DateTime?
+
+  session StudioSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([userId])
+  @@index([status])
+}
+
+enum ExportStatus {
+  pending
+  processing
+  completed
+  failed
+}
+
+enum ExportFormat {
+  wav
+  mp3
+  flac
+}
+
+model License {
+  id           String         @id @default(uuid())
+  workId       String
+  licensee     String
+  territory    String?
+  rightsType   LicenseRightsType
+  effectiveFrom DateTime
+  expiresOn    DateTime?
+  terms        Json?
+  status       LicenseStatus  @default(draft)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  work Work @relation(fields: [workId], references: [id], onDelete: Cascade)
+
+  @@index([workId])
+  @@index([status])
+}
+
+enum LicenseRightsType {
+  mechanical
+  performance
+  synchronization
+  master
+}
+
+enum LicenseStatus {
+  draft
+  active
+  expired
+  revoked
+}
+
+model EntityTag {
+  id          String            @id @default(uuid())
+  newsItemId  String
+  entityType  TaggedEntityType
+  entityId    String
+  confidence  Float             @default(0)
+  method      TaggingMethod     @default(heuristic)
+  matchedText String?
+  createdAt   DateTime          @default(now())
+
+  @@index([newsItemId])
+  @@index([entityType, entityId])
+}
+
+enum TaggedEntityType {
+  artist
+  work
+  recording
+}
+
+enum TaggingMethod {
+  heuristic
+  fuzzy
+  embedding
+  hybrid
+}
+
+model AlertChannel {
+  id               String             @id @default(uuid())
+  name             String
+  type             AlertChannelType
+  destination      String
+  config           Json?
+  isActive         Boolean            @default(true)
+  rateLimitPerHour Int                @default(30)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  rules            AlertRule[]
+  events           AlertEvent[]
+}
+
+enum AlertChannelType {
+  email
+  webhook
+  slack
+}
+
+model AlertRule {
+  id               String             @id @default(uuid())
+  name             String
+  description      String?
+  channelId        String
+  entityType       TaggedEntityType?
+  entityId         String?
+  minConfidence    Float              @default(0.7)
+  threshold        Int                @default(10)
+  windowMinutes    Int                @default(60)
+  cooldownMinutes  Int                @default(30)
+  template         Json?
+  isActive         Boolean            @default(true)
+  lastTriggeredAt  DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  channel          AlertChannel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  events           AlertEvent[]
+
+  @@index([channelId])
+  @@index([entityType, entityId])
+}
+
+model AlertEvent {
+  id          String            @id @default(uuid())
+  ruleId      String
+  channelId   String
+  entityType  TaggedEntityType
+  entityId    String
+  mentions    Int
+  confidence  Float?
+  payload     Json?
+  status      AlertEventStatus  @default(pending)
+  error       String?
+  sentAt      DateTime          @default(now())
+  rule        AlertRule         @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  channel     AlertChannel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([ruleId])
+  @@index([channelId])
+  @@index([entityType, entityId])
+}
+
+enum AlertEventStatus {
+  pending
+  sent
+  failed
 }

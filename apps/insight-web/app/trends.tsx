@@ -7,6 +7,7 @@ interface TrendRow {
   entity_id: string;
   mentions: number;
   avg_confidence: number;
+  last_seen: string;
 }
 
 export async function fetchTopEntities(limit = 20): Promise<TrendRow[]> {
@@ -15,7 +16,8 @@ export async function fetchTopEntities(limit = 20): Promise<TrendRow[]> {
       entity_type,
       entity_id,
       count(*) AS mentions,
-      avg(confidence) AS avg_confidence
+      avg(confidence) AS avg_confidence,
+      max(linked_at) AS last_seen
     FROM insight.entity_links
     WHERE linked_at >= now() - INTERVAL 7 DAY
     GROUP BY entity_type, entity_id

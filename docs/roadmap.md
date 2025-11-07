@@ -47,6 +47,8 @@ This roadmap sequences all prompts across Studio (Phase 1), Core (Phase 2), and 
    Prompt: "Expose Graph API endpoints to fetch ledger checkpoints and recompute Merkle roots for audit verification."
 8. **ADR updates**  
    Prompt: "Add ADRs covering (a) Postgres graph vs Neo4j, (b) append-only ledger vs blockchain anchoring."
+9. **Realtime subscriptions & license management**  
+   Prompt: "Add a Redis-backed `@omnisonic/pubsub` package, expose Graph API subscriptions (workUpdated, recordingUpdated, ledgerEntryCreated, cycleCheckpointClosed), implement the Prisma License model with GraphQL queries/mutations plus validation/conflict detection, wire a daily expiration worker, and update the frontend to consume the new subscriptions."
 
 ## Phase 3 - Insight (Cross-Genre News & Analytics)
 

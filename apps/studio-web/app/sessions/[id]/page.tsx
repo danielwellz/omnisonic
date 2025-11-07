@@ -2,8 +2,9 @@ import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { ExportMixdown } from "@/components/session/export-mixdown";
 import { UploadPanel } from "@/components/session/upload-panel";
+import { SessionExports } from "@/components/session/session-exports";
+import type { SerializedExport } from "@/lib/exports";
 
 type Owner = { id: string; name: string | null; email: string | null } | null;
 
@@ -17,6 +18,17 @@ async function fetchSession(id: string, baseUrl: string, cookie: string | null) 
   const data = await res.json();
   if (!data.session) return null;
   return { session: data.session as Session, currentUserId: data.currentUserId as string };
+}
+
+async function fetchExports(sessionId: string, baseUrl: string, cookie: string | null) {
+  const url = new URL(`/api/export?sessionId=${sessionId}`, baseUrl);
+  const res = await fetch(url.toString(), {
+    cache: "no-store",
+    headers: cookie ? { cookie } : undefined
+  });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => ({ exports: [] }));
+  return (data.exports ?? []) as SerializedExport[];
 }
 
 type Session = {
@@ -42,6 +54,8 @@ export default async function SessionDetail({ params }: { params: { id: string }
 
   const { session, currentUserId } = payload;
   const isOwner = session.owner?.id === currentUserId;
+  const exports = await fetchExports(session.id, baseUrl, cookie);
+  const maxActiveExports = Number.parseInt(process.env.EXPORT_MAX_ACTIVE ?? "2", 10);
 
   return (
     <main className="mx-auto flex max-w-3xl flex-col gap-8 py-12">
@@ -76,11 +90,16 @@ export default async function SessionDetail({ params }: { params: { id: string }
         <h2 className="text-xl font-semibold">Mixdown Export</h2>
         <p className="mt-2 text-sm text-muted-foreground">
           {isOwner
-            ? "Trigger a mixdown export and download the rendered audio when it completes."
+            ? "Kick off a render and grab the download once the worker finishes processing."
             : "Only the session owner can trigger exports."}
         </p>
         <div className="mt-4">
-          <ExportMixdown sessionId={session.id} disabled={!isOwner} />
+          <SessionExports
+            sessionId={session.id}
+            isOwner={isOwner}
+            initialExports={exports}
+            maxActive={Number.isFinite(maxActiveExports) ? maxActiveExports : 2}
+          />
         </div>
       </section>
       <section className="rounded-lg border bg-card p-6">

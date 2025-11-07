@@ -1,8 +1,21 @@
 import { createServer } from "http";
 import { createYoga, createSchema } from "graphql-yoga";
+import { GraphQLScalarType, Kind, ValueNode } from "graphql";
+import { WebSocketServer } from "ws";
+import { useServer } from "graphql-ws/lib/use/ws";
 import { prisma } from "@db/client";
+import { LicenseRightsType, LicenseStatus, TaggingMethod, TaggedEntityType } from "@prisma/client";
 import { isrcSchema, iswcSchema } from "@schemas/identifiers";
 import { merkleRoot } from "@omnisonic/royalty-ledger";
+import {
+  publishWorkUpdated,
+  publishRecordingUpdated,
+  publishLedgerEntryCreated,
+  publishCycleCheckpointClosed,
+  subscriptions,
+  shutdownPubSub
+} from "./events";
+import { assertNoLicenseConflicts, buildLicensePayload } from "./licenses";
 
 function normalizeIsrc(value?: string | null, context?: string) {
   if (!value) return null;
@@ -41,7 +54,76 @@ async function fetchLedgerEntries(cycleId: string) {
   });
 }
 
+prisma.$use(async (params, next) => {
+  const result = await next(params);
+  if (params.model === "LedgerEntry" && params.action === "create" && result) {
+    await publishLedgerEntryCreated(result.cycleId ?? null, result.id);
+  }
+  if (
+    params.model === "CycleCheckpoint" &&
+    params.action === "update" &&
+    params.args?.data?.closedAt !== undefined &&
+    result?.closedAt
+  ) {
+    await publishCycleCheckpointClosed(result.id);
+  }
+  return result;
+});
+
 const typeDefs = /* GraphQL */ `
+  scalar JSON
+
+  enum TaggedEntityType {
+    artist
+    work
+    recording
+  }
+
+  enum TaggingMethod {
+    heuristic
+    fuzzy
+    embedding
+    hybrid
+  }
+
+  type EntityTag {
+    id: ID!
+    newsItemId: ID!
+    entityType: TaggedEntityType!
+    entityId: String!
+    confidence: Float!
+    method: TaggingMethod!
+    matchedText: String
+    createdAt: String!
+  }
+
+  input EntityTagPayloadInput {
+    entityType: TaggedEntityType!
+    entityId: String!
+    confidence: Float!
+    method: TaggingMethod = heuristic
+    matchedText: String
+  }
+
+  input EntityTagBatchInput {
+    newsItemId: ID!
+    tags: [EntityTagPayloadInput!]!
+  }
+
+  enum LicenseStatus {
+    draft
+    active
+    expired
+    revoked
+  }
+
+  enum LicenseRightsType {
+    mechanical
+    performance
+    synchronization
+    master
+  }
+
   type Work {
     id: ID!
     title: String!
@@ -88,11 +170,14 @@ const typeDefs = /* GraphQL */ `
 
   type License {
     id: ID!
+    workId: ID!
     licensee: String!
-    territory: String!
-    rightsType: String!
+    territory: String
+    rightsType: LicenseRightsType!
     effectiveFrom: String!
     expiresOn: String
+    status: LicenseStatus!
+    terms: JSON
     work: Work!
   }
 
@@ -126,6 +211,14 @@ const typeDefs = /* GraphQL */ `
     recording(id: ID!): Recording
     cycleCheckpoint(id: ID!): CycleCheckpoint
     cycleCheckpoints(limit: Int = 20, offset: Int = 0): [CycleCheckpoint!]!
+    license(id: ID!): License
+    licenses(workId: ID): [License!]!
+    activeLicenses(
+      workId: ID
+      territory: String
+      rightsType: LicenseRightsType
+    ): [License!]!
+    entityTags(newsItemId: ID!): [EntityTag!]!
   }
 
   input RecordingUpsertInput {
@@ -137,21 +230,77 @@ const typeDefs = /* GraphQL */ `
     releasedAt: String
   }
 
+  input LicenseInput {
+    workId: ID!
+    licensee: String!
+    territory: String
+    rightsType: LicenseRightsType!
+    effectiveFrom: String!
+    expiresOn: String
+    terms: JSON
+    status: LicenseStatus
+  }
+
   type Mutation {
     upsertRecording(input: RecordingUpsertInput!): Recording!
+    createLicense(input: LicenseInput!): License!
+    updateLicense(id: ID!, input: LicenseInput!): License!
+    revokeLicense(id: ID!): License!
+    recordEntityTags(input: EntityTagBatchInput!): [EntityTag!]!
+  }
+
+  type Subscription {
+    workUpdated(workId: ID!): Work!
+    recordingUpdated(recordingId: ID!): Recording!
+    ledgerEntryCreated(cycleId: ID): LedgerEntry!
+    cycleCheckpointClosed(cycleId: ID): CycleCheckpoint!
   }
 `;
+
+function literalToValue(ast: ValueNode): any {
+  switch (ast.kind) {
+    case Kind.STRING:
+    case Kind.BOOLEAN:
+      return ast.value;
+    case Kind.INT:
+    case Kind.FLOAT:
+      return Number(ast.value);
+    case Kind.OBJECT: {
+      const value: Record<string, unknown> = {};
+      for (const field of ast.fields) {
+        value[field.name.value] = literalToValue(field.value);
+      }
+      return value;
+    }
+    case Kind.LIST:
+      return ast.values.map(literalToValue);
+    case Kind.NULL:
+      return null;
+    default:
+      return null;
+  }
+}
+
+const JSONScalar = new GraphQLScalarType({
+  name: "JSON",
+  description: "Arbitrary JSON value",
+  serialize: (value) => value,
+  parseValue: (value) => value,
+  parseLiteral: literalToValue
+});
 
 const schema = createSchema({
   typeDefs,
   resolvers: {
+    JSON: JSONScalar,
     Query: {
       work: async (_parent, args: { id: string }) =>
         prisma.work.findUnique({
           where: { id: args.id },
           include: {
             recordings: true,
-            contributions: { include: { contributor: true } }
+            contributions: { include: { contributor: true } },
+            licenses: true
           }
         }),
       recording: async (_parent, args: { id: string }) =>
@@ -183,6 +332,34 @@ const schema = createSchema({
           orderBy: { cycleNumber: "desc" },
           skip: args.offset ?? 0,
           take: Math.min(args.limit ?? 20, 100)
+        }),
+      license: (_parent, args: { id: string }) => prisma.license.findUnique({ where: { id: args.id } }),
+      licenses: (_parent, args: { workId?: string }) =>
+        prisma.license.findMany({
+          where: args.workId ? { workId: args.workId } : {},
+          orderBy: { createdAt: "desc" }
+        }),
+      activeLicenses: (
+        _parent,
+        args: { workId?: string; territory?: string | null; rightsType?: LicenseRightsType | null }
+      ) =>
+        prisma.license.findMany({
+          where: {
+            status: LicenseStatus.active,
+            ...(args.workId ? { workId: args.workId } : {}),
+            ...(args.territory !== undefined
+              ? { territory: args.territory === "" ? null : args.territory }
+              : {}),
+            ...(args.rightsType
+              ? { rightsType: args.rightsType as LicenseRightsType }
+              : {})
+          },
+          orderBy: { effectiveFrom: "asc" }
+        }),
+      entityTags: (_parent, args: { newsItemId: string }) =>
+        prisma.entityTag.findMany({
+          where: { newsItemId: args.newsItemId },
+          orderBy: { createdAt: "desc" }
         })
     },
     Mutation: {
@@ -238,6 +415,8 @@ const schema = createSchema({
               }
             }
           });
+          await publishRecordingUpdated(updated.id);
+          await publishWorkUpdated(updated.workId);
           return updated;
         }
 
@@ -278,7 +457,115 @@ const schema = createSchema({
             }
           }
         });
+        await publishRecordingUpdated(created.id);
+        await publishWorkUpdated(created.workId);
         return created;
+      },
+      createLicense: async (_parent, args: { input: any }) => {
+        const payload = buildLicensePayload(args.input);
+        await assertNoLicenseConflicts(payload);
+        const license = await prisma.license.create({
+          data: {
+            workId: payload.workId,
+            licensee: payload.licensee,
+            territory: payload.territory,
+            rightsType: payload.rightsType,
+            effectiveFrom: payload.effectiveFrom,
+            expiresOn: payload.expiresOn ?? undefined,
+            terms: payload.terms,
+            status: payload.status
+          }
+        });
+        await publishWorkUpdated(license.workId);
+        return license;
+      },
+      updateLicense: async (_parent, args: { id: string; input: any }) => {
+        const existing = await prisma.license.findUnique({ where: { id: args.id } });
+        if (!existing) {
+          throw new Error("License not found");
+        }
+        const payload = buildLicensePayload(
+          {
+            ...args.input,
+            status: args.input.status ?? existing.status
+          },
+          { allowAllStatuses: true }
+        );
+        await assertNoLicenseConflicts(payload, args.id);
+        const license = await prisma.license.update({
+          where: { id: args.id },
+          data: {
+            workId: payload.workId,
+            licensee: payload.licensee,
+            territory: payload.territory,
+            rightsType: payload.rightsType,
+            effectiveFrom: payload.effectiveFrom,
+            expiresOn: payload.expiresOn ?? undefined,
+            terms: payload.terms,
+            status: payload.status
+          }
+        });
+        await publishWorkUpdated(license.workId);
+        return license;
+      },
+      revokeLicense: async (_parent, args: { id: string }) => {
+        const license = await prisma.license.update({
+          where: { id: args.id },
+          data: {
+            status: LicenseStatus.revoked,
+            expiresOn: new Date()
+          }
+        });
+        await publishWorkUpdated(license.workId);
+        return license;
+      },
+      recordEntityTags: async (
+        _parent,
+        args: {
+          input: {
+            newsItemId: string;
+            tags: Array<{
+              entityType: "artist" | "work" | "recording";
+              entityId: string;
+              confidence: number;
+              method?: "heuristic" | "fuzzy" | "embedding" | "hybrid";
+              matchedText?: string | null;
+            }>;
+          };
+        }
+      ) => {
+        const { newsItemId, tags } = args.input;
+        if (!newsItemId) {
+          throw new Error("newsItemId is required");
+        }
+
+        await prisma.entityTag.deleteMany({ where: { newsItemId } });
+
+        if (!tags || tags.length === 0) {
+          return [];
+        }
+
+        if (tags.length > 5000) {
+          throw new Error("Too many tags submitted; limit is 5000");
+        }
+
+        const sanitized = tags.map((tag) => ({
+          newsItemId,
+          entityType: tag.entityType as TaggedEntityType,
+          entityId: tag.entityId,
+          confidence: Number.isFinite(tag.confidence)
+            ? Math.max(0, Math.min(tag.confidence, 1))
+            : 0,
+          method: (tag.method ?? "heuristic") as TaggingMethod,
+          matchedText: tag.matchedText ?? null
+        }));
+
+        await prisma.entityTag.createMany({ data: sanitized });
+
+        return prisma.entityTag.findMany({
+          where: { newsItemId },
+          orderBy: { createdAt: "desc" }
+        });
       }
     },
     Work: {
@@ -305,7 +592,12 @@ const schema = createSchema({
           where: { workId: work.id },
           include: { contributor: true, work: true }
         }),
-      licenses: () => [],
+      licenses: (work: any) =>
+        work.licenses ??
+        prisma.license.findMany({
+          where: { workId: work.id },
+          orderBy: { createdAt: "desc" }
+        }),
       createdAt: (work: any) => work.createdAt.toISOString(),
       updatedAt: (work: any) => work.updatedAt.toISOString()
     },
@@ -359,13 +651,25 @@ const schema = createSchema({
       createdAt: (contribution: any) => contribution.createdAt.toISOString()
     },
     License: {
-      id: () => "",
-      licensee: () => "",
-      territory: () => "",
-      rightsType: () => "",
-      effectiveFrom: () => new Date(0).toISOString(),
-      expiresOn: () => null,
-      work: () => null
+      territory: (license: any) => license.territory ?? null,
+      rightsType: (license: any) => license.rightsType,
+      effectiveFrom: (license: any) => license.effectiveFrom.toISOString(),
+      expiresOn: (license: any) => (license.expiresOn ? license.expiresOn.toISOString() : null),
+      status: (license: any) => license.status,
+      terms: (license: any) => license.terms ?? null,
+      work: (license: any) =>
+        license.work ??
+        prisma.work.findUnique({
+          where: { id: license.workId },
+          include: {
+            recordings: true,
+            contributions: { include: { contributor: true } },
+            licenses: true
+          }
+        })
+    },
+    EntityTag: {
+      createdAt: (tag: any) => tag.createdAt.toISOString()
     },
     CycleCheckpoint: {
       totalAmount: (checkpoint: any) => decimalToString(checkpoint.totalAmount) ?? "0",
@@ -397,6 +701,75 @@ const schema = createSchema({
     LedgerEntry: {
       amount: (entry: any) => decimalToString(entry.amount) ?? "0",
       createdAt: (entry: any) => entry.createdAt.toISOString()
+    },
+    Subscription: {
+      workUpdated: {
+        subscribe: (_parent: unknown, args: { workId: string }) => subscriptions.workUpdated(args.workId),
+        resolve: async (payload: { id: string }) => {
+          const work = await prisma.work.findUnique({
+            where: { id: payload.id },
+            include: {
+              recordings: true,
+              contributions: { include: { contributor: true } },
+              licenses: true
+            }
+          });
+          if (!work) {
+            throw new Error("Work not found");
+          }
+          return work;
+        }
+      },
+      recordingUpdated: {
+        subscribe: (_parent: unknown, args: { recordingId: string }) =>
+          subscriptions.recordingUpdated(args.recordingId),
+        resolve: async (payload: { id: string }) => {
+          const recording = await prisma.recording.findUnique({
+            where: { id: payload.id },
+            include: {
+              work: {
+                include: {
+                  recordings: true,
+                  contributions: { include: { contributor: true } }
+                }
+              }
+            }
+          });
+          if (!recording) {
+            throw new Error("Recording not found");
+          }
+          return recording;
+        }
+      },
+      ledgerEntryCreated: {
+        subscribe: (_parent: unknown, args: { cycleId?: string | null }) =>
+          subscriptions.ledgerEntryCreated(args.cycleId ?? null),
+        resolve: async (payload: { id: string }) => {
+          const entry = await prisma.ledgerEntry.findUnique({ where: { id: payload.id } });
+          if (!entry) {
+            throw new Error("Ledger entry not found");
+          }
+          return entry;
+        }
+      },
+      cycleCheckpointClosed: {
+        subscribe: (_parent: unknown, args: { cycleId?: string | null }) =>
+          subscriptions.cycleCheckpointClosed(args.cycleId ?? null),
+        resolve: async (payload: { id: string }) => {
+          const checkpoint = await prisma.cycleCheckpoint.findUnique({
+            where: { id: payload.id },
+            include: {
+              ledgerEntries: {
+                orderBy: { id: "asc" }
+              }
+            }
+          });
+          if (!checkpoint) {
+            throw new Error("Checkpoint not found");
+          }
+          return checkpoint;
+        }
+      }
     }
   }
 });
@@ -406,9 +779,68 @@ const yoga = createYoga({
   graphqlEndpoint: "/graphql"
 });
 
-const server = createServer(yoga);
-const port = Number.parseInt(process.env.PORT ?? "4000", 10);
+const httpServer = createServer(yoga);
+const httpPort = Number.parseInt(process.env.PORT ?? "4000", 10);
+const wsPort = Number.parseInt(process.env.GRAPH_API_WS_PORT ?? process.env.GRAPH_WS_PORT ?? "4001", 10);
 
-server.listen(port, () => {
-  console.log(`Graph API ready at http://localhost:${port}/graphql`);
+const wsServer = new WebSocketServer({
+  port: wsPort,
+  path: yoga.graphqlEndpoint
 });
+
+const serverCleanup = useServer(
+  {
+    execute: (args) => args.execute,
+    subscribe: (args) => args.subscribe,
+    onSubscribe: async (ctx, msg) => {
+      const { schema, execute, subscribe, contextFactory, parse, validate } = yoga.getEnveloped({
+        ...ctx,
+        req: ctx.extra?.request,
+        socket: ctx.extra?.socket,
+        params: msg.payload
+      });
+
+      const document = parse(msg.payload.query);
+      const validationErrors = validate(schema, document);
+      if (validationErrors.length > 0) {
+        return validationErrors;
+      }
+
+      return {
+        schema,
+        execute,
+        subscribe,
+        context: await contextFactory(),
+        document,
+        variables: msg.payload.variables,
+        operationName: msg.payload.operationName
+      };
+    }
+  },
+  wsServer
+);
+
+httpServer.listen(httpPort, () => {
+  console.log(`Graph API ready at http://localhost:${httpPort}/graphql`);
+  console.log(`Subscriptions ready at ws://localhost:${wsPort}${yoga.graphqlEndpoint}`);
+});
+
+async function shutdown() {
+  await new Promise<void>((resolve, reject) => {
+    httpServer.close((err) => (err ? reject(err) : resolve()));
+  });
+  await serverCleanup.dispose();
+  wsServer.close();
+  await shutdownPubSub();
+}
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    shutdown()
+      .then(() => process.exit(0))
+      .catch((error) => {
+        console.error("Failed to shutdown graph-api", error);
+        process.exit(1);
+      });
+  });
+}

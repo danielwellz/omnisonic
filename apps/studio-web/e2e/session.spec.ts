@@ -34,5 +34,9 @@ test.describe("Studio sessions", () => {
     const uploadInput = page.getByTestId("upload-input");
     await uploadInput.setInputFiles("apps/studio-web/e2e/fixtures/sample.wav");
     await expect(page.getByText("sample.wav")).toBeVisible();
+
+    await page.getByRole("button", { name: "Render mixdown" }).click();
+    await expect(page.getByText("Export queued")).toBeVisible();
+    await expect(page.getByText(/Status:/)).toBeVisible();
   });
 });

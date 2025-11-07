@@ -105,6 +105,11 @@ export function generateStorageKey(userId: string, fileName: string): string {
   return `uploads/${userId}/${Date.now()}-${safeName}`;
 }
 
+export function generateExportKey(userId: string, exportId: string, format: string): string {
+  const safeFormat = format.replace(/[^a-z0-9]/gi, "").toLowerCase() || "wav";
+  return `exports/${userId}/${exportId}.${safeFormat}`;
+}
+
 export function getStorageType() {
   return STORAGE_TYPE;
 }

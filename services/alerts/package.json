@@ -9,8 +9,13 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@clickhouse/client": "0.4.3",
-    "pino": "9.3.0"
+    "@omnisonic/db": "workspace:*",
+    "@clickhouse/client": "1.12.1",
+    "@slack/webhook": "7.0.3",
+    "fastify": "4.28.1",
+    "nodemailer": "6.9.14",
+    "pino": "9.3.0",
+    "zod": "3.23.8"
   },
   "devDependencies": {
     "tsx": "4.19.0",

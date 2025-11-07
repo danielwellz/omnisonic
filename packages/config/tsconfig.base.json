@@ -12,7 +12,9 @@
       "@schemas/*": ["../schemas/src/*"],
       "@trpc/*": ["../trpc/src/*"],
       "@db/*": ["../db/src/*"],
-      "@storage/*": ["../storage/src/*"]
+      "@storage/*": ["../storage/src/*"],
+      "@omnisonic/pubsub": ["../pubsub/src/index.ts"],
+      "@pubsub/*": ["../pubsub/src/*"]
     }
   }
 }

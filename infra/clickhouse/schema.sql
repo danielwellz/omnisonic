@@ -30,3 +30,57 @@ FROM insight.news_items
 WHERE published_at >= now() - INTERVAL 7 DAY
 GROUP BY source
 ORDER BY total_items DESC;
+
+CREATE VIEW IF NOT EXISTS insight.entity_mentions_timeseries AS
+SELECT
+    entity_type,
+    entity_id,
+    toStartOfDay(linked_at) AS day,
+    count() AS mentions,
+    avg(confidence) AS avg_confidence
+FROM insight.entity_links
+GROUP BY entity_type, entity_id, day
+ORDER BY day DESC;
+
+CREATE VIEW IF NOT EXISTS insight.genre_trends AS
+SELECT
+    genre,
+    day,
+    count(*) AS mentions,
+    uniqExact(source) AS unique_sources
+FROM (
+    SELECT
+        arrayJoin(tags) AS genre,
+        source,
+        toStartOfDay(published_at) AS day
+    FROM insight.news_items
+)
+WHERE genre != ''
+GROUP BY genre, day
+ORDER BY day DESC;
+
+CREATE VIEW IF NOT EXISTS insight.source_performance AS
+SELECT
+    base.source,
+    base.total_items,
+    tags.unique_tags,
+    base.first_seen,
+    base.last_seen
+FROM (
+    SELECT
+        source,
+        count() AS total_items,
+        min(published_at) AS first_seen,
+        max(published_at) AS last_seen
+    FROM insight.news_items
+    GROUP BY source
+) AS base
+LEFT JOIN (
+    SELECT
+        source,
+        uniqExact(tag) AS unique_tags
+    FROM insight.news_items
+    ARRAY JOIN tags AS tag
+    GROUP BY source
+) AS tags USING (source)
+ORDER BY base.total_items DESC;
